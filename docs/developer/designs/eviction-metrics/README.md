@@ -37,7 +37,7 @@ The PodGroup is an internal scheduler abstraction; the metric should let operato
 - A single PromQL aggregation answers "how disrupted has *workload X* been" without `label_replace` or PG-name regex.
 - Both "how many disruption events" and "how many pods evicted" can be answered, and one is not derivable from the other.
 - `rate()` / `increase()` produce correct non-zero output starting from the first eviction of any workload.
-- A workload that is destroyed and re-submitted with the same name aggregates as one logical workload across its lifetimes.
+- Re-submissions of the same name stay aggregatable with `sum by (owner_name)`; `owner_uid` distinguishes object generations.
 - Per-subgroup visibility for any workload whose PodGroup carries leaf SubGroups, reconstructable in PromQL without overcounting at higher levels of aggregation.
 
 ## Non-Goals
@@ -54,14 +54,14 @@ The PodGroup is an internal scheduler abstraction; the metric should let operato
 ```
 kai_pod_group_evicted_pods_total{
   podgroup, namespace, nodepool, action,
-  owner_group, owner_kind, owner_name, subgroup
+  owner_group, owner_kind, owner_name, owner_uid, subgroup
 }
 # Counter. Increments by 1 per pod evicted.
 # Pre-initialized at 0 when the scheduler first observes the PodGroup.
 
 kai_pod_group_eviction_events_total{                          # NEW
   podgroup, namespace, nodepool, action,
-  owner_group, owner_kind, owner_name
+  owner_group, owner_kind, owner_name, owner_uid
 }
 # Counter. Increments by 1 per scheduling decision that evicts pods from this PG.
 # Pre-initialized at 0 when the scheduler first observes the PodGroup.
@@ -77,9 +77,10 @@ kai_pod_group_eviction_events_total{                          # NEW
 | `action` | scheduler action type | Unchanged. Values: `preempt`, `reclaim`, `consolidation`, `stalegangeviction`. |
 | `owner_group` | `kai.scheduler/top-owner-metadata` annotation on the PodGroup | NEW. The API Group of the top-level workload object (`kubeflow.org`, `jobset.x-k8s.io`, `apps`, …). Disambiguates Kinds shared across operators (e.g., `MPIJob` from kubeflow vs mpi-operator). `""` for core/v1 objects. |
 | `owner_kind` | `kai.scheduler/top-owner-metadata` annotation on the PodGroup | NEW. The Kind of the top-level workload object (`JobSet`, `Deployment`, `MPIJob`, …). |
-| `owner_name` | `kai.scheduler/top-owner-metadata` annotation on the PodGroup | NEW. The Name of the top-level workload object. Re-submissions of the same name aggregate together. |
+| `owner_name` | `kai.scheduler/top-owner-metadata` annotation on the PodGroup | NEW. The Name of the top-level workload object. |
+| `owner_uid` | `kai.scheduler/top-owner-metadata` annotation on the PodGroup | NEW. The UID of the top-level workload object. Distinguishes name reuse across delete/recreate; stable while the owner object is unchanged. |
 | `subgroup` | `kai.scheduler/subgroup-name` label on the evicted pod (pods counter only) | NEW. The leaf SubGroup the evicted pod belongs to. `""` for flat PodGroups. |
-| `uid` | — | REMOVED. |
+| `uid` | — | REMOVED. PodGroup UID, not the owner UID (`owner_uid`). |
 
 #### Why source `owner_*` from the annotation, not `OwnerReferences`
 
@@ -87,7 +88,13 @@ The podgrouper writes the annotation `kai.scheduler/top-owner-metadata` on every
 
 `PodGroup.OwnerReferences` is not a reliable source because grouper plugins override it for plugin-specific purposes — e.g., the Deployment grouper sets the ownerReference to the Pod itself rather than the Deployment, to keep its per-pod PodGroup naming model coherent. The top-owner annotation always reflects the true workload object regardless of grouper plugin quirks.
 
-For PodGroups without a top-owner annotation, all three labels (`owner_group`, `owner_kind`, `owner_name`) are emitted as `""`.
+For PodGroups without a top-owner annotation, all four labels (`owner_group`, `owner_kind`, `owner_name`, `owner_uid`) are emitted as `""`.
+
+#### Why `owner_uid` from day one
+
+Two live owners of the same group/kind cannot share a name in one namespace, so `owner_group` + `owner_kind` + `namespace` + `owner_name` already disambiguates concurrent objects. The label is added anyway: Kubernetes allows reusing a name after delete, and adding it in a later release would be a series-identity break.
+
+`sum by (namespace, owner_group, owner_kind, owner_name)` still folds resubmits into one number. Leave `owner_uid` in the aggregation to split generations ("this run vs the previous run").
 
 #### Why `owner_group` but not `owner_version`
 
@@ -257,6 +264,13 @@ sum by (owner_name, subgroup) (
 
 # "Eviction rate per scheduling action"
 sum by (action) (rate(kai_pod_group_eviction_events_total[5m]))
+
+# "This run of alice-dev vs earlier generations that reused the name"
+sum by (owner_uid) (
+  increase(kai_pod_group_eviction_events_total{
+    namespace="user-x", owner_kind="Workspace", owner_name="alice-dev"
+  }[24h])
+)
 ```
 
 ## Cardinality
@@ -280,6 +294,8 @@ The honest trade-off operators should know about:
 
 We accept this cost because there is no alternative that solves the "first-eviction invisible to `rate()` / `increase()`" problem (the whole motivation for this design) without pre-initialization. Skipping pre-init keeps the metric broken in exactly the way #1573 reports.
 
+`owner_uid` does not multiply live cardinality (one owner per PG). It only splits series across time when an owner is recreated with the same name.
+
 For Deployments specifically, the per-pod PG model means `P` scales with pod count, not workload count. Operators querying by `owner_name` recover the workload view via aggregation — dashboards stay tractable.
 
 ## Migration / breaking changes
@@ -287,7 +303,7 @@ For Deployments specifically, the per-pod PG model means `P` scales with pod cou
 | Change | Type | Impact |
 |---|---|---|
 | Drop `uid` label | **Breaking** | Existing dashboard panels that filter on `uid="..."` return empty. In practice impact is expected to be near-zero because (a) the metric is broken for rate-based queries today, so consumers using it are limited, and (b) `uid` is an internal value, not a human-typed filter. CHANGELOG entry required. |
-| Add `owner_group`, `owner_kind`, `owner_name`, `subgroup` | Additive | Changes series identity, but queries that `sum by (...)` without these labels keep working. |
+| Add `owner_group`, `owner_kind`, `owner_name`, `owner_uid`, `subgroup` | Additive | Changes series identity, but queries that `sum by (...)` without these labels keep working. |
 | Pre-init at 0 on first observe | Additive | New zero-valued series for never-evicted PGs. Cardinality bound = active PGs × actions. |
 | New `kai_pod_group_eviction_events_total` | Additive | No impact on existing consumers. |
 
@@ -297,7 +313,7 @@ Mitigation if `uid` removal is a concern: keep `uid` for one release behind a fe
 
 These are explicitly not addressed by this design. The first is a follow-up I would expect to open as its own issue; the second is a known edge case the design does not attempt to fix.
 
-- **Externally-created PodGroups have no owner labels.** PodGroups created outside the podgrouper (per the [`external-podgroups`](../external-podgroups/README.md) design) do not carry the `kai.scheduler/top-owner-metadata` annotation. For those PGs, `owner_kind=""` and `owner_name=""`. A follow-up issue should either define a convention for labeling external PGs (e.g., an explicit annotation users can set) or accept empty values as the intended behavior. Out of scope for this PR.
+- **Externally-created PodGroups have no owner labels.** PodGroups created outside the podgrouper (per the [`external-podgroups`](../external-podgroups/README.md) design) do not carry the `kai.scheduler/top-owner-metadata` annotation. For those PGs, `owner_group=""`, `owner_kind=""`, `owner_name=""`, and `owner_uid=""`. A follow-up issue should either define a convention for labeling external PGs (e.g., an explicit annotation users can set) or accept empty values as the intended behavior. Out of scope for this PR.
 - **Pre-init / first-eviction race within one scrape interval.** Pre-initializing the series at 0 on PodGroup observation only solves `rate()` if at least one Prometheus scrape interval elapses between observation and the first eviction. If a PG is observed and evicted inside the same scrape interval, only the post-eviction value is sampled and `rate()` still cannot derive a rate. PGs typically live for at least minutes, so this is an edge case the design accepts rather than fixes.
 
 ## Design decisions
@@ -318,7 +334,7 @@ When a leaf SubGroup is evicted, only the leaf's `(podgroup, subgroup)` series i
 
 ### `uid` removal is a hard break, not a soft deprecation
 
-The `uid` label is dropped rather than kept for one release behind a feature flag. Keeping it would continue to spawn fresh series on every PG recreation and amplify the first-sample-invisible problem that pre-initialization is meant to fix. The migration section above offers a feature-flag transition if maintainers prefer it.
+The `uid` label (PodGroup UID) is dropped rather than kept for one release behind a feature flag. Keeping it would continue to spawn fresh series on every PG recreation and amplify the first-sample-invisible problem that pre-initialization is meant to fix. The migration section above offers a feature-flag transition if maintainers prefer it. `owner_uid` is a different identifier and does not reintroduce that churn.
 
 ## Implementation
 
