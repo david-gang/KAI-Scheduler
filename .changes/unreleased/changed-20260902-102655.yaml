@@ -1,3 +1,0 @@
-kind: Changed
-body: |-
-  Initialize eviction metrics only for enabled eviction actions
