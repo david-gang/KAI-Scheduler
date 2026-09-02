@@ -116,18 +116,21 @@ func registerSchedulerPodInformer(informerFactory informers.SharedInformerFactor
 func registerPodGroupEvictionMetricHandlers(
 	informer k8scache.SharedIndexInformer,
 	nodePoolLabelKey string,
+	evictionActionNames []string,
 ) error {
 	_, err := informer.AddEventHandler(k8scache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			if podGroup, ok := obj.(*enginev2alpha2.PodGroup); ok {
-				metrics.InitPodGroupEvictionMetrics(podGroup, nodePoolLabelKey)
+				metrics.InitPodGroupEvictionMetrics(podGroup, nodePoolLabelKey, evictionActionNames)
 			}
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			oldPodGroup, oldOK := oldObj.(*enginev2alpha2.PodGroup)
 			newPodGroup, newOK := newObj.(*enginev2alpha2.PodGroup)
 			if oldOK && newOK {
-				metrics.InitPodGroupEvictionMetricsOnUpdate(oldPodGroup, newPodGroup, nodePoolLabelKey)
+				metrics.InitPodGroupEvictionMetricsOnUpdate(
+					oldPodGroup, newPodGroup, nodePoolLabelKey, evictionActionNames,
+				)
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
@@ -170,6 +173,7 @@ type SchedulerCacheParams struct {
 	UpdatePodEvictionCondition  bool
 	StuckInReleasingThreshold   time.Duration
 	DiscoveryClient             discovery.DiscoveryInterface
+	EvictionActionNames         []string
 }
 
 type SchedulerCache struct {
@@ -238,6 +242,7 @@ func newSchedulerCache(schedulerCacheParams *SchedulerCacheParams) (*SchedulerCa
 	if err := registerPodGroupEvictionMetricHandlers(
 		sc.kubeAiSchedulerInformerFactory.Scheduling().V2alpha2().PodGroups().Informer(),
 		sc.schedulingNodePoolParams.NodePoolLabelKey,
+		schedulerCacheParams.EvictionActionNames,
 	); err != nil {
 		return nil, fmt.Errorf("failed to register PodGroup eviction metric handlers: %w", err)
 	}

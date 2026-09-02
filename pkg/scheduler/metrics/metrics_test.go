@@ -87,10 +87,11 @@ func TestPodGroupEvictionMetricLifecycle(t *testing.T) {
 			},
 		},
 	}
+	evictionActionNames := []string{"preempt"}
 
-	InitPodGroupEvictionMetrics(podGroup, "node-pool")
-	require.Equal(t, 8, countMetricsForPodGroup(t, "pod_group_evicted_pods_total", podGroup))
-	require.Equal(t, 4, countMetricsForPodGroup(t, "pod_group_eviction_events_total", podGroup))
+	InitPodGroupEvictionMetrics(podGroup, "node-pool", evictionActionNames)
+	require.Equal(t, 2, countMetricsForPodGroup(t, "pod_group_evicted_pods_total", podGroup))
+	require.Equal(t, 1, countMetricsForPodGroup(t, "pod_group_eviction_events_total", podGroup))
 	require.Zero(t, metricValueForLabels(t, "pod_group_evicted_pods_total", map[string]string{
 		"podgroup":  podGroup.Name,
 		"namespace": podGroup.Namespace,
@@ -99,7 +100,7 @@ func TestPodGroupEvictionMetricLifecycle(t *testing.T) {
 	}))
 
 	IncPodGroupEvictedPods(podGroup, "gpu", "preempt", "prefill")
-	InitPodGroupEvictionMetrics(podGroup, "node-pool")
+	InitPodGroupEvictionMetrics(podGroup, "node-pool", evictionActionNames)
 	require.Equal(t, float64(1), metricValueForLabels(t, "pod_group_evicted_pods_total", map[string]string{
 		"podgroup":  podGroup.Name,
 		"namespace": podGroup.Namespace,
@@ -110,8 +111,8 @@ func TestPodGroupEvictionMetricLifecycle(t *testing.T) {
 	oldPodGroup := podGroup.DeepCopy()
 	podGroup.Spec.SubGroups = append(podGroup.Spec.SubGroups,
 		enginev2alpha2.SubGroup{Name: "postprocessor", Parent: ptr.To("pipeline"), MinMember: ptr.To(int32(1))})
-	InitPodGroupEvictionMetricsOnUpdate(oldPodGroup, podGroup, "node-pool")
-	require.Equal(t, 12, countMetricsForPodGroup(t, "pod_group_evicted_pods_total", podGroup))
+	InitPodGroupEvictionMetricsOnUpdate(oldPodGroup, podGroup, "node-pool", evictionActionNames)
+	require.Equal(t, 3, countMetricsForPodGroup(t, "pod_group_evicted_pods_total", podGroup))
 	require.Equal(t, float64(1), metricValueForLabels(t, "pod_group_evicted_pods_total", map[string]string{
 		"podgroup":  podGroup.Name,
 		"namespace": podGroup.Namespace,

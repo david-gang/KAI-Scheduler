@@ -38,19 +38,7 @@ const (
 
 	// OnSessionClose label
 	OnSessionClose = "OnSessionClose"
-
-	reclaimAction           = "reclaim"
-	preemptAction           = "preempt"
-	consolidationAction     = "consolidation"
-	staleGangEvictionAction = "stalegangeviction"
 )
-
-var evictionActions = []string{
-	reclaimAction,
-	preemptAction,
-	consolidationAction,
-	staleGangEvictionAction,
-}
 
 var (
 	currentAction                                  string
@@ -439,10 +427,14 @@ func IncPodGroupEvictionEvents(podGroup *enginev2alpha2.PodGroup, nodepool, acti
 }
 
 // InitPodGroupEvictionMetrics creates zero-valued series before the first eviction.
-func InitPodGroupEvictionMetrics(podGroup *enginev2alpha2.PodGroup, nodePoolLabelKey string) {
+func InitPodGroupEvictionMetrics(
+	podGroup *enginev2alpha2.PodGroup,
+	nodePoolLabelKey string,
+	evictionActionNames []string,
+) {
 	nodepool := utils.GetNodePoolNameFromLabels(podGroup.Labels, nodePoolLabelKey)
 	subgroups := leafSubgroups(podGroup.Spec.SubGroups)
-	for _, action := range evictionActions {
+	for _, action := range evictionActionNames {
 		eventLabels := podGroupEvictionLabels(podGroup, nodepool, action)
 		podGroupEvictionEventsTotal.WithLabelValues(eventLabels...).Add(0)
 		for _, subgroup := range subgroups {
@@ -456,6 +448,7 @@ func InitPodGroupEvictionMetrics(podGroup *enginev2alpha2.PodGroup, nodePoolLabe
 func InitPodGroupEvictionMetricsOnUpdate(
 	oldPodGroup, newPodGroup *enginev2alpha2.PodGroup,
 	nodePoolLabelKey string,
+	evictionActionNames []string,
 ) {
 	oldLeaves := make(map[string]struct{}, len(oldPodGroup.Spec.SubGroups))
 	for _, subgroup := range leafSubgroups(oldPodGroup.Spec.SubGroups) {
@@ -467,7 +460,7 @@ func InitPodGroupEvictionMetricsOnUpdate(
 		if _, exists := oldLeaves[subgroup]; exists {
 			continue
 		}
-		for _, action := range evictionActions {
+		for _, action := range evictionActionNames {
 			labels := append(podGroupEvictionLabels(newPodGroup, nodepool, action), subgroup)
 			podGroupEvictedPodsTotal.WithLabelValues(labels...).Add(0)
 		}
