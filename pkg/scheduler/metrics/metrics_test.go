@@ -12,6 +12,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/utils/ptr"
@@ -85,6 +87,13 @@ func TestPodGroupEvictionMetricLifecycle(t *testing.T) {
 				{Name: "pipeline", MinSubGroup: ptr.To(int32(2))},
 				{Name: "prefill", Parent: ptr.To("pipeline"), MinMember: ptr.To(int32(1))},
 				{Name: "decode", Parent: ptr.To("pipeline"), MinMember: ptr.To(int32(1))},
+			},
+		},
+		Status: enginev2alpha2.PodGroupStatus{
+			ResourcesStatus: enginev2alpha2.PodGroupResourcesStatus{
+				Allocated: v1.ResourceList{
+					commonconstants.NvidiaGpuResource: resource.MustParse("1"),
+				},
 			},
 		},
 	}
@@ -195,7 +204,43 @@ func TestWorkloadPodGroupEvictionMetricsSkipOtherPartitions(t *testing.T) {
 	localPodGroup := foreignPodGroup.DeepCopy()
 	localPodGroup.Name = "local"
 	localPodGroup.Labels["node-pool"] = "gpu-a"
+	localPodGroup.Status.ResourcesStatus.Allocated = v1.ResourceList{
+		commonconstants.NvidiaGpuResource: resource.MustParse("1"),
+	}
 	recorder.OnAdd(localPodGroup)
+
+	families := gatherMetricFamilies(t, registry)
+	require.Len(t, families["pod_group_evicted_pods_total"].GetMetric(), 1)
+	require.Len(t, families["pod_group_eviction_events_total"].GetMetric(), 1)
+}
+
+func TestWorkloadPodGroupEvictionMetricsSkipPendingPodGroups(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	recorder := newPodGroupEvictionRecorder(
+		"",
+		true,
+		labels.Everything(),
+		"node-pool",
+		[]string{"preempt"},
+		registry,
+	)
+	pending := &enginev2alpha2.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pending",
+			Namespace: "ns",
+			Labels:    map[string]string{"node-pool": "gpu"},
+		},
+	}
+
+	recorder.OnAdd(pending)
+	recorder.OnUpdate(pending.DeepCopy(), pending)
+	require.Empty(t, gatherMetricFamilies(t, registry))
+
+	allocated := pending.DeepCopy()
+	allocated.Status.ResourcesStatus.Allocated = v1.ResourceList{
+		commonconstants.NvidiaGpuResource: resource.MustParse("1"),
+	}
+	recorder.OnUpdate(pending, allocated)
 
 	families := gatherMetricFamilies(t, registry)
 	require.Len(t, families["pod_group_evicted_pods_total"].GetMetric(), 1)

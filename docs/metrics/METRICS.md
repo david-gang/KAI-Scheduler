@@ -72,7 +72,7 @@ Set the scheduler argument `enable-workload-eviction-metrics` to `"true"` to rep
 - `pod_group_evicted_pods_total` uses `podgroup`, `namespace`, `nodepool`, `action`, `owner_group`, `owner_kind`, `owner_name`, `owner_uid`, and `subgroup`.
 - `pod_group_eviction_events_total` counts committed eviction decisions using the same labels except `subgroup`.
 
-The option is disabled by default. When enabled, zero-valued series are created for PodGroups assigned to the scheduler's shard and removed when those PodGroups are deleted.
+The option is disabled by default. When enabled, zero-valued series are created for PodGroups on this scheduler shard after they hold allocated resources, and removed when those PodGroups are deleted. Pending PodGroups do not create series.
 
 ### Queue Fair-Share & Usage Metrics
 

@@ -26,6 +26,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto" // auto-registry collectors in default registry
 	"gopkg.in/yaml.v3"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 
 	enginev2alpha2 "github.com/kai-scheduler/KAI-scheduler/pkg/apis/scheduling/v2alpha2"
@@ -511,26 +512,22 @@ func (r *workloadPodGroupEvictionRecorder) RecordsPodGroupLifecycle() bool {
 }
 
 func (r *workloadPodGroupEvictionRecorder) OnAdd(podGroup *enginev2alpha2.PodGroup) {
-	if !r.matchesPartition(podGroup) {
+	if !r.matchesPartition(podGroup) || !hasAllocatedResources(podGroup) {
 		return
 	}
 
-	nodepool := utils.GetNodePoolNameFromLabels(podGroup.Labels, r.nodePoolLabelKey)
-	subgroups := leafSubgroups(podGroup.Spec.SubGroups)
-	for _, action := range r.evictionActionNames {
-		eventLabels := podGroupEvictionLabels(podGroup, nodepool, action)
-		r.evictionEvents.WithLabelValues(eventLabels...).Add(0)
-		for _, subgroup := range subgroups {
-			podLabels := append(eventLabels, subgroup)
-			r.evictedPods.WithLabelValues(podLabels...).Add(0)
-		}
-	}
+	r.initSeries(podGroup)
 }
 
 func (r *workloadPodGroupEvictionRecorder) OnUpdate(
 	oldPodGroup, newPodGroup *enginev2alpha2.PodGroup,
 ) {
-	if !r.matchesPartition(newPodGroup) {
+	if !r.matchesPartition(newPodGroup) || !hasAllocatedResources(newPodGroup) {
+		return
+	}
+
+	if !hasAllocatedResources(oldPodGroup) {
+		r.initSeries(newPodGroup)
 		return
 	}
 
@@ -549,6 +546,33 @@ func (r *workloadPodGroupEvictionRecorder) OnUpdate(
 			r.evictedPods.WithLabelValues(metricLabels...).Add(0)
 		}
 	}
+}
+
+func (r *workloadPodGroupEvictionRecorder) initSeries(podGroup *enginev2alpha2.PodGroup) {
+	nodepool := utils.GetNodePoolNameFromLabels(podGroup.Labels, r.nodePoolLabelKey)
+	subgroups := leafSubgroups(podGroup.Spec.SubGroups)
+	for _, action := range r.evictionActionNames {
+		eventLabels := podGroupEvictionLabels(podGroup, nodepool, action)
+		r.evictionEvents.WithLabelValues(eventLabels...).Add(0)
+		for _, subgroup := range subgroups {
+			podLabels := append(eventLabels, subgroup)
+			r.evictedPods.WithLabelValues(podLabels...).Add(0)
+		}
+	}
+}
+
+func hasAllocatedResources(podGroup *enginev2alpha2.PodGroup) bool {
+	return resourceListHasQuantity(podGroup.Status.ResourcesStatus.Allocated) ||
+		resourceListHasQuantity(podGroup.Status.ResourcesStatus.AllocatedNonPreemptible)
+}
+
+func resourceListHasQuantity(resources v1.ResourceList) bool {
+	for _, quantity := range resources {
+		if !quantity.IsZero() {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *workloadPodGroupEvictionRecorder) OnDelete(podGroup *enginev2alpha2.PodGroup) {
