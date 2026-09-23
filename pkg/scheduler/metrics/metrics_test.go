@@ -13,6 +13,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/utils/ptr"
 
 	enginev2alpha2 "github.com/kai-scheduler/KAI-scheduler/pkg/apis/scheduling/v2alpha2"
@@ -88,8 +89,15 @@ func TestPodGroupEvictionMetricLifecycle(t *testing.T) {
 		},
 	}
 	evictionActionNames := []string{"preempt"}
+	recorder := NewPodGroupEvictionRecorder(
+		"",
+		true,
+		labels.Everything(),
+		"node-pool",
+		evictionActionNames,
+	)
 
-	InitPodGroupEvictionMetrics(podGroup, "node-pool", evictionActionNames)
+	recorder.OnAdd(podGroup)
 	require.Equal(t, 2, countMetricsForPodGroup(t, "pod_group_evicted_pods_total", podGroup))
 	require.Equal(t, 1, countMetricsForPodGroup(t, "pod_group_eviction_events_total", podGroup))
 	require.Zero(t, metricValueForLabels(t, "pod_group_evicted_pods_total", map[string]string{
@@ -99,8 +107,8 @@ func TestPodGroupEvictionMetricLifecycle(t *testing.T) {
 		"subgroup":  "prefill",
 	}))
 
-	IncPodGroupEvictedPods(podGroup, "gpu", "preempt", "prefill")
-	InitPodGroupEvictionMetrics(podGroup, "node-pool", evictionActionNames)
+	recorder.IncEvictedPods(podGroup, "gpu", "preempt", "prefill")
+	recorder.OnAdd(podGroup)
 	require.Equal(t, float64(1), metricValueForLabels(t, "pod_group_evicted_pods_total", map[string]string{
 		"podgroup":  podGroup.Name,
 		"namespace": podGroup.Namespace,
@@ -111,7 +119,7 @@ func TestPodGroupEvictionMetricLifecycle(t *testing.T) {
 	oldPodGroup := podGroup.DeepCopy()
 	podGroup.Spec.SubGroups = append(podGroup.Spec.SubGroups,
 		enginev2alpha2.SubGroup{Name: "postprocessor", Parent: ptr.To("pipeline"), MinMember: ptr.To(int32(1))})
-	InitPodGroupEvictionMetricsOnUpdate(oldPodGroup, podGroup, "node-pool", evictionActionNames)
+	recorder.OnUpdate(oldPodGroup, podGroup)
 	require.Equal(t, 3, countMetricsForPodGroup(t, "pod_group_evicted_pods_total", podGroup))
 	require.Equal(t, float64(1), metricValueForLabels(t, "pod_group_evicted_pods_total", map[string]string{
 		"podgroup":  podGroup.Name,
@@ -120,9 +128,89 @@ func TestPodGroupEvictionMetricLifecycle(t *testing.T) {
 		"subgroup":  "prefill",
 	}))
 
-	DeletePodGroupEvictionMetrics(podGroup.Namespace, podGroup.Name)
+	recorder.OnDelete(podGroup)
 	require.Zero(t, countMetricsForPodGroup(t, "pod_group_evicted_pods_total", podGroup))
 	require.Zero(t, countMetricsForPodGroup(t, "pod_group_eviction_events_total", podGroup))
+}
+
+func TestLegacyPodGroupEvictionMetrics(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	recorder := newPodGroupEvictionRecorder(
+		"",
+		false,
+		labels.Everything(),
+		"node-pool",
+		nil,
+		registry,
+	)
+	require.False(t, recorder.RecordsPodGroupLifecycle())
+	podGroup := &enginev2alpha2.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "legacy-pg",
+			Namespace: "legacy-ns",
+			UID:       "legacy-uid",
+		},
+	}
+
+	recorder.OnAdd(podGroup)
+	require.Empty(t, gatherMetricFamilies(t, registry))
+
+	recorder.IncEvictedPods(podGroup, "gpu", "preempt", "ignored")
+	families := gatherMetricFamilies(t, registry)
+	require.Contains(t, families, "pod_group_evicted_pods_total")
+	require.NotContains(t, families, "pod_group_eviction_events_total")
+	require.Equal(t, map[string]string{
+		"action":    "preempt",
+		"namespace": "legacy-ns",
+		"nodepool":  "gpu",
+		"podgroup":  "legacy-pg",
+		"uid":       "legacy-uid",
+	}, labelsForMetric(families["pod_group_evicted_pods_total"].GetMetric()[0]))
+}
+
+func TestWorkloadPodGroupEvictionMetricsSkipOtherPartitions(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	recorder := newPodGroupEvictionRecorder(
+		"",
+		true,
+		labels.SelectorFromSet(map[string]string{"node-pool": "gpu-a"}),
+		"node-pool",
+		[]string{"preempt"},
+		registry,
+	)
+	require.True(t, recorder.RecordsPodGroupLifecycle())
+	foreignPodGroup := &enginev2alpha2.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "foreign",
+			Namespace: "ns",
+			Labels:    map[string]string{"node-pool": "gpu-b"},
+		},
+	}
+
+	recorder.OnAdd(foreignPodGroup)
+	recorder.OnUpdate(foreignPodGroup.DeepCopy(), foreignPodGroup)
+	recorder.OnDelete(foreignPodGroup)
+	require.Empty(t, gatherMetricFamilies(t, registry))
+
+	localPodGroup := foreignPodGroup.DeepCopy()
+	localPodGroup.Name = "local"
+	localPodGroup.Labels["node-pool"] = "gpu-a"
+	recorder.OnAdd(localPodGroup)
+
+	families := gatherMetricFamilies(t, registry)
+	require.Len(t, families["pod_group_evicted_pods_total"].GetMetric(), 1)
+	require.Len(t, families["pod_group_eviction_events_total"].GetMetric(), 1)
+}
+
+func gatherMetricFamilies(t *testing.T, gatherer prometheus.Gatherer) map[string]*dto.MetricFamily {
+	t.Helper()
+	families, err := gatherer.Gather()
+	require.NoError(t, err)
+	result := make(map[string]*dto.MetricFamily, len(families))
+	for _, family := range families {
+		result[family.GetName()] = family
+	}
+	return result
 }
 
 func countMetricsForPodGroup(t *testing.T, familyName string, podGroup *enginev2alpha2.PodGroup) int {

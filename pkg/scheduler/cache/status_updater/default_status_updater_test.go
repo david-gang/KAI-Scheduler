@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
@@ -34,6 +35,7 @@ import (
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/podgroup_info/subgroup_info"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/resource_info"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/log"
+	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/metrics"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/test_utils/jobs_fake"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/test_utils/tasks_fake"
 )
@@ -730,7 +732,9 @@ func TestDefaultStatusUpdater_RecordJobStatusEvent(t *testing.T) {
 			kubeClient := fake.NewSimpleClientset()
 			kubeAiSchedClient := kubeaischedfake.NewSimpleClientset(podGroups...)
 			recorder := record.NewFakeRecorder(100)
-			statusUpdater := New(kubeClient, kubeAiSchedClient, recorder, 1, false, nodePoolLabelKey)
+			statusUpdater := New(
+				kubeClient, kubeAiSchedClient, recorder, 1, false, nodePoolLabelKey, newTestEvictionMetrics(),
+			)
 			wg := sync.WaitGroup{}
 			if test.numPodGroupStatusUpdateCalled > 0 {
 				wg.Add(test.numPodGroupStatusUpdateCalled)
@@ -835,7 +839,9 @@ func TestDefaultStatusUpdater_RecordStaleJobEvent(t *testing.T) {
 			kubeClient := fake.NewSimpleClientset()
 			kubeAiSchedClient := kubeaischedfake.NewSimpleClientset()
 			recorder := record.NewFakeRecorder(100)
-			statusUpdater := New(kubeClient, kubeAiSchedClient, recorder, 1, false, nodePoolLabelKey)
+			statusUpdater := New(
+				kubeClient, kubeAiSchedClient, recorder, 1, false, nodePoolLabelKey, newTestEvictionMetrics(),
+			)
 
 			stopCh := make(chan struct{})
 			statusUpdater.Run(stopCh)
@@ -861,7 +867,9 @@ func TestDefaultStatusUpdater_RetryAfterError(t *testing.T) {
 	kubeClient := fake.NewSimpleClientset()
 	kubeAiSchedClient := kubeaischedfake.NewSimpleClientset()
 	recorder := record.NewFakeRecorder(100)
-	statusUpdater := New(kubeClient, kubeAiSchedClient, recorder, 1, false, nodePoolLabelKey)
+	statusUpdater := New(
+		kubeClient, kubeAiSchedClient, recorder, 1, false, nodePoolLabelKey, newTestEvictionMetrics(),
+	)
 
 	updateCalls := 0
 	// Return a transient error so the update is retried.
@@ -1072,7 +1080,13 @@ func newEvictionTestStatusUpdater() *defaultStatusUpdater {
 	kubeClient := fake.NewSimpleClientset()
 	kubeAiSchedClient := kubeaischedfake.NewSimpleClientset()
 	recorder := record.NewFakeRecorder(100)
-	return New(kubeClient, kubeAiSchedClient, recorder, 1, false, nodePoolLabelKey)
+	return New(
+		kubeClient, kubeAiSchedClient, recorder, 1, false, nodePoolLabelKey, newTestEvictionMetrics(),
+	)
+}
+
+func newTestEvictionMetrics() metrics.PodGroupEvictionRecorder {
+	return metrics.NewPodGroupEvictionRecorder("", true, labels.Everything(), nodePoolLabelKey, nil)
 }
 
 func makeEvictionPodGroup(t *testing.T, suffix string) *enginev2alpha2.PodGroup {
@@ -1179,7 +1193,9 @@ func TestEvicted_EmitsAnnotatedEventWithMetadata(t *testing.T) {
 	recorder := &annotationCapturingRecorder{}
 	kubeClient := fake.NewSimpleClientset()
 	kubeAiSchedClient := kubeaischedfake.NewSimpleClientset()
-	statusUpdater := New(kubeClient, kubeAiSchedClient, recorder, 1, false, nodePoolLabelKey)
+	statusUpdater := New(
+		kubeClient, kubeAiSchedClient, recorder, 1, false, nodePoolLabelKey, newTestEvictionMetrics(),
+	)
 
 	statusUpdater.Evicted(&v1.Pod{}, pg, eviction_info.EvictionMetadata{
 		Action:           "preempt",
