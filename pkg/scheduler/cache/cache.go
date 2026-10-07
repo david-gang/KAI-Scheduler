@@ -31,6 +31,7 @@ import (
 	"go.uber.org/multierr"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/discovery"
@@ -115,13 +116,14 @@ func registerSchedulerPodInformer(informerFactory informers.SharedInformerFactor
 
 func registerPodGroupEvictionMetricHandlers(
 	informer k8scache.SharedIndexInformer,
+	partitionSelector labels.Selector,
 	nodePoolLabelKey string,
 	evictionActionNames []string,
 ) error {
 	_, err := informer.AddEventHandler(k8scache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			if podGroup, ok := obj.(*enginev2alpha2.PodGroup); ok {
-				metrics.InitPodGroupEvictionMetrics(podGroup, nodePoolLabelKey, evictionActionNames)
+				metrics.InitPodGroupEvictionMetrics(podGroup, partitionSelector, nodePoolLabelKey, evictionActionNames)
 			}
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
@@ -129,7 +131,7 @@ func registerPodGroupEvictionMetricHandlers(
 			newPodGroup, newOK := newObj.(*enginev2alpha2.PodGroup)
 			if oldOK && newOK {
 				metrics.InitPodGroupEvictionMetricsOnUpdate(
-					oldPodGroup, newPodGroup, nodePoolLabelKey, evictionActionNames,
+					oldPodGroup, newPodGroup, partitionSelector, nodePoolLabelKey, evictionActionNames,
 				)
 			}
 		},
@@ -145,7 +147,7 @@ func registerPodGroupEvictionMetricHandlers(
 					return
 				}
 			}
-			metrics.DeletePodGroupEvictionMetrics(podGroup.Namespace, podGroup.Name)
+			metrics.DeletePodGroupEvictionMetrics(podGroup, partitionSelector)
 		},
 	})
 	return err
@@ -239,8 +241,13 @@ func newSchedulerCache(schedulerCacheParams *SchedulerCacheParams) (*SchedulerCa
 		return nil, fmt.Errorf("failed to set scheduler pod transform: %w", err)
 	}
 	sc.kubeAiSchedulerInformerFactory = kubeaischedulerinfo.NewSharedInformerFactory(sc.kubeAiSchedulerClient, 0)
+	partitionSelector, err := sc.schedulingNodePoolParams.GetLabelSelector()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create scheduling partition selector: %w", err)
+	}
 	if err := registerPodGroupEvictionMetricHandlers(
 		sc.kubeAiSchedulerInformerFactory.Scheduling().V2alpha2().PodGroups().Informer(),
+		partitionSelector,
 		sc.schedulingNodePoolParams.NodePoolLabelKey,
 		schedulerCacheParams.EvictionActionNames,
 	); err != nil {

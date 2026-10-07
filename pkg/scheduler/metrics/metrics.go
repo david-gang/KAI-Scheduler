@@ -26,10 +26,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto" // auto-registry collectors in default registry
 	"gopkg.in/yaml.v3"
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 
-	enginev2alpha2 "github.com/kai-scheduler/KAI-scheduler/pkg/apis/scheduling/v2alpha2"
 	commonconstants "github.com/kai-scheduler/KAI-scheduler/pkg/common/constants"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/utils"
+	enginev2alpha2 "github.com/kai-scheduler/api/scheduling/v2alpha2"
 )
 
 const (
@@ -427,7 +429,53 @@ func IncPodGroupEvictionEvents(podGroup *enginev2alpha2.PodGroup, nodepool, acti
 }
 
 // InitPodGroupEvictionMetrics creates zero-valued series before the first eviction.
+// Pending PodGroups and PodGroups outside this scheduler shard are skipped so they do not allocate series.
 func InitPodGroupEvictionMetrics(
+	podGroup *enginev2alpha2.PodGroup,
+	partitionSelector labels.Selector,
+	nodePoolLabelKey string,
+	evictionActionNames []string,
+) {
+	if !matchesPartition(podGroup, partitionSelector) || !hasAllocatedResources(podGroup) {
+		return
+	}
+	initPodGroupEvictionSeries(podGroup, nodePoolLabelKey, evictionActionNames)
+}
+
+// InitPodGroupEvictionMetricsOnUpdate creates series when a PodGroup first holds resources,
+// and for leaf subgroups added after that.
+func InitPodGroupEvictionMetricsOnUpdate(
+	oldPodGroup, newPodGroup *enginev2alpha2.PodGroup,
+	partitionSelector labels.Selector,
+	nodePoolLabelKey string,
+	evictionActionNames []string,
+) {
+	if !matchesPartition(newPodGroup, partitionSelector) || !hasAllocatedResources(newPodGroup) {
+		return
+	}
+	if !hasAllocatedResources(oldPodGroup) {
+		initPodGroupEvictionSeries(newPodGroup, nodePoolLabelKey, evictionActionNames)
+		return
+	}
+
+	oldLeaves := make(map[string]struct{}, len(oldPodGroup.Spec.SubGroups))
+	for _, subgroup := range leafSubgroups(oldPodGroup.Spec.SubGroups) {
+		oldLeaves[subgroup] = struct{}{}
+	}
+
+	nodepool := utils.GetNodePoolNameFromLabels(newPodGroup.Labels, nodePoolLabelKey)
+	for _, subgroup := range leafSubgroups(newPodGroup.Spec.SubGroups) {
+		if _, exists := oldLeaves[subgroup]; exists {
+			continue
+		}
+		for _, action := range evictionActionNames {
+			metricLabels := append(podGroupEvictionLabels(newPodGroup, nodepool, action), subgroup)
+			podGroupEvictedPodsTotal.WithLabelValues(metricLabels...).Add(0)
+		}
+	}
+}
+
+func initPodGroupEvictionSeries(
 	podGroup *enginev2alpha2.PodGroup,
 	nodePoolLabelKey string,
 	evictionActionNames []string,
@@ -444,27 +492,22 @@ func InitPodGroupEvictionMetrics(
 	}
 }
 
-// InitPodGroupEvictionMetricsOnUpdate creates series for leaf subgroups added after creation.
-func InitPodGroupEvictionMetricsOnUpdate(
-	oldPodGroup, newPodGroup *enginev2alpha2.PodGroup,
-	nodePoolLabelKey string,
-	evictionActionNames []string,
-) {
-	oldLeaves := make(map[string]struct{}, len(oldPodGroup.Spec.SubGroups))
-	for _, subgroup := range leafSubgroups(oldPodGroup.Spec.SubGroups) {
-		oldLeaves[subgroup] = struct{}{}
-	}
+func matchesPartition(podGroup *enginev2alpha2.PodGroup, partitionSelector labels.Selector) bool {
+	return partitionSelector.Matches(labels.Set(podGroup.Labels))
+}
 
-	nodepool := utils.GetNodePoolNameFromLabels(newPodGroup.Labels, nodePoolLabelKey)
-	for _, subgroup := range leafSubgroups(newPodGroup.Spec.SubGroups) {
-		if _, exists := oldLeaves[subgroup]; exists {
-			continue
-		}
-		for _, action := range evictionActionNames {
-			labels := append(podGroupEvictionLabels(newPodGroup, nodepool, action), subgroup)
-			podGroupEvictedPodsTotal.WithLabelValues(labels...).Add(0)
+func hasAllocatedResources(podGroup *enginev2alpha2.PodGroup) bool {
+	return resourceListHasQuantity(podGroup.Status.ResourcesStatus.Allocated) ||
+		resourceListHasQuantity(podGroup.Status.ResourcesStatus.AllocatedNonPreemptible)
+}
+
+func resourceListHasQuantity(resources v1.ResourceList) bool {
+	for _, quantity := range resources {
+		if !quantity.IsZero() {
+			return true
 		}
 	}
+	return false
 }
 
 func leafSubgroups(subgroups []enginev2alpha2.SubGroup) []string {
@@ -488,11 +531,14 @@ func leafSubgroups(subgroups []enginev2alpha2.SubGroup) []string {
 	return leaves
 }
 
-// DeletePodGroupEvictionMetrics removes all series for a deleted pod group.
-func DeletePodGroupEvictionMetrics(namespace, podGroup string) {
-	labels := prometheus.Labels{"namespace": namespace, "podgroup": podGroup}
-	podGroupEvictedPodsTotal.DeletePartialMatch(labels)
-	podGroupEvictionEventsTotal.DeletePartialMatch(labels)
+// DeletePodGroupEvictionMetrics removes all series for a deleted pod group on this scheduler shard.
+func DeletePodGroupEvictionMetrics(podGroup *enginev2alpha2.PodGroup, partitionSelector labels.Selector) {
+	if !matchesPartition(podGroup, partitionSelector) {
+		return
+	}
+	metricLabels := prometheus.Labels{"namespace": podGroup.Namespace, "podgroup": podGroup.Name}
+	podGroupEvictedPodsTotal.DeletePartialMatch(metricLabels)
+	podGroupEvictionEventsTotal.DeletePartialMatch(metricLabels)
 }
 
 func IncScenarioSearchJobs[A ~string](action A, result string, reducedBudget bool) {

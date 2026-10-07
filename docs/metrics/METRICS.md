@@ -68,6 +68,8 @@ Metrics related to the core scheduling algorithm performance, task lifecycle, an
 | `scenario_search_duration_seconds` | Histogram | `endpoint`, `instance`, `job`, `namespace`, `pod`, `service`, `action`, `generator`, `result` | Duration in seconds of generator scenario-search attempts. Buckets: [1ms, 2ms, 4ms, ..., 32.768s] (exponential). |
 | `scenario_search_scenarios_total` | Counter | `endpoint`, `instance`, `job`, `namespace`, `pod`, `service`, `action`, `generator`, `state` | Cumulative count of bounded-search scenarios emitted by generators, simulated by the solver, rejected by validation, or skipped as duplicates of already-failed scenarios. |
 
+Zero-valued series for `pod_group_evicted_pods_total` and `pod_group_eviction_events_total` are created for PodGroups on this scheduler shard after they hold allocated resources, and removed when those PodGroups are deleted. Pending PodGroups do not create series.
+
 ### Queue Fair-Share & Usage Metrics
 
 | Metric Name | Type | Labels | Description |
