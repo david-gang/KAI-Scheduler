@@ -131,7 +131,7 @@ func TestPodGroupEvictionMetricLifecycle(t *testing.T) {
 		"subgroup":  "prefill",
 	}))
 
-	DeletePodGroupEvictionMetrics(podGroup, partition)
+	DeletePodGroupEvictionMetrics(podGroup, partition, "node-pool", evictionActionNames)
 	require.Zero(t, countMetricsForPodGroup(t, "pod_group_evicted_pods_total", podGroup))
 	require.Zero(t, countMetricsForPodGroup(t, "pod_group_eviction_events_total", podGroup))
 }
@@ -156,7 +156,7 @@ func TestPodGroupEvictionMetricsSkipOtherPartitions(t *testing.T) {
 
 	InitPodGroupEvictionMetrics(foreignPodGroup, partition, "node-pool", []string{"preempt"})
 	InitPodGroupEvictionMetricsOnUpdate(foreignPodGroup.DeepCopy(), foreignPodGroup, partition, "node-pool", []string{"preempt"})
-	DeletePodGroupEvictionMetrics(foreignPodGroup, partition)
+	DeletePodGroupEvictionMetrics(foreignPodGroup, partition, "node-pool", []string{"preempt"})
 	require.Zero(t, countMetricsForPodGroup(t, "pod_group_evicted_pods_total", foreignPodGroup))
 	require.Zero(t, countMetricsForPodGroup(t, "pod_group_eviction_events_total", foreignPodGroup))
 
@@ -166,7 +166,7 @@ func TestPodGroupEvictionMetricsSkipOtherPartitions(t *testing.T) {
 	InitPodGroupEvictionMetrics(localPodGroup, partition, "node-pool", []string{"preempt"})
 	require.Equal(t, 1, countMetricsForPodGroup(t, "pod_group_evicted_pods_total", localPodGroup))
 	require.Equal(t, 1, countMetricsForPodGroup(t, "pod_group_eviction_events_total", localPodGroup))
-	DeletePodGroupEvictionMetrics(localPodGroup, partition)
+	DeletePodGroupEvictionMetrics(localPodGroup, partition, "node-pool", []string{"preempt"})
 }
 
 func TestPodGroupEvictionMetricsSkipPendingPodGroups(t *testing.T) {
@@ -192,7 +192,49 @@ func TestPodGroupEvictionMetricsSkipPendingPodGroups(t *testing.T) {
 	InitPodGroupEvictionMetricsOnUpdate(pending, allocated, partition, "node-pool", []string{"preempt"})
 	require.Equal(t, 1, countMetricsForPodGroup(t, "pod_group_evicted_pods_total", allocated))
 	require.Equal(t, 1, countMetricsForPodGroup(t, "pod_group_eviction_events_total", allocated))
-	DeletePodGroupEvictionMetrics(allocated, partition)
+	DeletePodGroupEvictionMetrics(allocated, partition, "node-pool", []string{"preempt"})
+}
+
+func TestPodGroupEvictionMetricsDeleteRemovedSubgroup(t *testing.T) {
+	tag := fmt.Sprintf("%d", time.Now().UnixNano())
+	podGroup := &enginev2alpha2.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pg-" + tag,
+			Namespace: "ns-" + tag,
+			Labels:    map[string]string{"node-pool": "gpu"},
+		},
+		Spec: enginev2alpha2.PodGroupSpec{
+			SubGroups: []enginev2alpha2.SubGroup{
+				{Name: "prefill", MinMember: ptr.To(int32(1))},
+				{Name: "decode", MinMember: ptr.To(int32(1))},
+			},
+		},
+		Status: enginev2alpha2.PodGroupStatus{
+			ResourcesStatus: enginev2alpha2.PodGroupResourcesStatus{
+				Allocated: v1.ResourceList{
+					commonconstants.NvidiaGpuResource: resource.MustParse("1"),
+				},
+			},
+		},
+	}
+	partition := labels.Everything()
+	actions := []string{"preempt", "reclaim"}
+
+	InitPodGroupEvictionMetrics(podGroup, partition, "node-pool", actions)
+	require.Equal(t, 4, countMetricsForPodGroup(t, "pod_group_evicted_pods_total", podGroup))
+	require.Equal(t, 2, countMetricsForPodGroup(t, "pod_group_eviction_events_total", podGroup))
+
+	oldPodGroup := podGroup.DeepCopy()
+	podGroup.Spec.SubGroups = []enginev2alpha2.SubGroup{
+		{Name: "prefill", MinMember: ptr.To(int32(1))},
+	}
+	InitPodGroupEvictionMetricsOnUpdate(oldPodGroup, podGroup, partition, "node-pool", actions)
+	require.Equal(t, 2, countMetricsForPodGroup(t, "pod_group_evicted_pods_total", podGroup))
+	require.Equal(t, 2, countMetricsForPodGroup(t, "pod_group_eviction_events_total", podGroup))
+
+	DeletePodGroupEvictionMetrics(podGroup, partition, "node-pool", actions)
+	require.Zero(t, countMetricsForPodGroup(t, "pod_group_evicted_pods_total", podGroup))
+	require.Zero(t, countMetricsForPodGroup(t, "pod_group_eviction_events_total", podGroup))
 }
 
 func countMetricsForPodGroup(t *testing.T, familyName string, podGroup *enginev2alpha2.PodGroup) int {

@@ -147,7 +147,7 @@ func registerPodGroupEvictionMetricHandlers(
 					return
 				}
 			}
-			metrics.DeletePodGroupEvictionMetrics(podGroup, partitionSelector)
+			metrics.DeletePodGroupEvictionMetrics(podGroup, partitionSelector, nodePoolLabelKey, evictionActionNames)
 		},
 	})
 	return err
